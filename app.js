@@ -12,11 +12,20 @@ const PRIORITY_LABEL = { LOW: 'Rendah', NORMAL: 'Normal', HIGH: 'Tinggi', URGENT
 const PRIORITY_ORDER = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
 const CATS = ['Speedup', 'Preparation', 'Transaction', 'Claim', 'Other Operational'];
 
+function safeRead(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (error) {
+    return fallback;
+  }
+}
+
 const state = {
-  session: JSON.parse(localStorage.getItem('utpama_session') || 'null'),
-  tickets: JSON.parse(localStorage.getItem('utpama_tickets') || '[]'),
-  users: JSON.parse(localStorage.getItem('utpama_users') || 'null') || DEFAULT_USERS.map(u => ({ ...u })),
-  notifs: JSON.parse(localStorage.getItem('utpama_notifs') || '[]'),
+  session: safeRead('utpama_session', null),
+  tickets: safeRead('utpama_tickets', []),
+  users: safeRead('utpama_users', null) || DEFAULT_USERS.map(u => ({ ...u })),
+  notifs: safeRead('utpama_notifs', []),
   view: 'tickets',
   detailId: null,
   error: '',
@@ -31,10 +40,90 @@ const state = {
   supabase: null,
 };
 
+function makeDemoTickets() {
+  const now = Date.now();
+  const d = (offsetHours) => new Date(now - offsetHours * 60 * 60 * 1000).toISOString();
+
+  return [
+    {
+      id: 'demo-1',
+      no: 'TKT-0001',
+      title: 'Akses material terbatas saat pengecekan unit',
+      desc: 'Material untuk pemeliharaan unit sulit masuk ke area kerja karena proses picking belum selesai.',
+      category: 'Preparation',
+      priority: 'HIGH',
+      targetParty: 'BOTH',
+      evidence: 'Foto area picking dan timeline proses.',
+      status: 'PROCESSING',
+      createdAt: d(18),
+      createdBy: 'pamaplant',
+      createdByName: 'PAMA Plant',
+      feedbacks: [
+        { by: 'ut', byName: 'United Tractors', role: 'UT', message: 'Proses penyesuaian jadwal pengiriman material mulai dilakukan.', evidence: 'Update log 09:00', at: d(16) },
+      ],
+      part: { no: 'P-101', name: 'Filter Udara', qty: 2, unit: 'Unit 8A' },
+    },
+    {
+      id: 'demo-2',
+      no: 'TKT-0002',
+      title: 'Request approval transaksi cepat untuk unit 2007',
+      desc: 'Unit 2007 membutuhkan approval transaksi cepat agar pekerjaan tidak tertunda.',
+      category: 'Transaction',
+      priority: 'URGENT',
+      targetParty: 'UT',
+      evidence: 'E-mail approval dan checklist unit.',
+      status: 'OPEN',
+      createdAt: d(7),
+      createdBy: 'smpama',
+      createdByName: 'SM PAMA',
+      feedbacks: [],
+    },
+    {
+      id: 'demo-3',
+      no: 'TKT-0003',
+      title: 'Claim biaya kelebihan spare part',
+      desc: 'Ada selisih item pada pengiriman spare part yang sudah diverifikasi namun belum di-claim.',
+      category: 'Claim',
+      priority: 'NORMAL',
+      targetParty: 'SM_PAMA',
+      evidence: 'Dokumen invoice dan foto paket.',
+      status: 'CLOSED',
+      createdAt: d(72),
+      createdBy: 'ut',
+      createdByName: 'United Tractors',
+      feedbacks: [
+        { by: 'smpama', byName: 'SM PAMA', role: 'SM_PAMA', message: 'Claim sudah diproses dan disetujui.', evidence: 'No claim: CLM-288', at: d(68) },
+      ],
+    }
+  ];
+}
+
+function ensureDemoData() {
+  if (!state.tickets || !state.tickets.length) {
+    state.tickets = makeDemoTickets();
+    saveLocalState();
+  }
+}
+
 function saveLocalState() {
   localStorage.setItem('utpama_tickets', JSON.stringify(state.tickets));
   localStorage.setItem('utpama_users', JSON.stringify(state.users));
   localStorage.setItem('utpama_notifs', JSON.stringify(state.notifs));
+}
+
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') || 'light';
+}
+
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('utpama_theme', theme);
+}
+
+function toggleTheme() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  setTheme(next);
+  render();
 }
 
 function escapeHtml(value) {
@@ -51,6 +140,12 @@ function fmtDate(value) {
   if (!value) return '-';
   const d = new Date(value);
   return d.toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtShortDate(value) {
+  if (!value) return '-';
+  const d = new Date(value);
+  return d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 function userByUsername(username) {
@@ -160,9 +255,37 @@ function filteredTickets() {
   return list;
 }
 
-function setAlert(type, message) {
-  if (type === 'error') state.error = message;
-  else state.success = message;
+function exportCsv() {
+  const rows = filteredTickets();
+  const header = ['No. Tiket', 'Judul', 'Kategori', 'Prioritas', 'Status', 'Ditujukan', 'Dibuat Oleh', 'Tanggal'];
+  const csv = [header.join(',')].concat(rows.map((ticket) => [
+    ticket.no || '',
+    `"${(ticket.title || '').replace(/"/g, '""')}"`,
+    ticket.category || '',
+    ticket.priority || 'NORMAL',
+    ticket.status || '',
+    TARGET_LABEL[ticket.targetParty] || ticket.targetParty || 'BOTH',
+    ticket.createdByName || '',
+    fmtShortDate(ticket.createdAt)
+  ].join(','))).join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = 'ut-pama-tickets.csv';
+  anchor.click();
+  URL.revokeObjectURL(url);
+  state.success = 'CSV berhasil diunduh.';
+  render();
+}
+
+function resetDemoData() {
+  if (!confirm('Reset semua data demo dan isi ulang data default?')) return;
+  state.tickets = makeDemoTickets();
+  state.users = DEFAULT_USERS.map(u => ({ ...u }));
+  saveLocalState();
+  state.success = 'Data demo berhasil direset.';
   render();
 }
 
@@ -179,7 +302,7 @@ function renderLogin() {
           </div>
           <div class="wordmark">UT <span>×</span> PAMA</div>
           <div class="hero-sub">DISTRIK INDO</div>
-          <p class="hero-tag">Sistem tiket operasional untuk dokumentasi, prioritasi, dan tindak lanjut kebutuhan UT, PAMA Plant, dan SM PAMA.</p>
+          <p class="hero-tag">Sistem tiket operasional untuk dokumentasi, prioritas, dan tindak lanjut kebutuhan UT, PAMA Plant, dan SM PAMA.</p>
         </div>
       </div>
       <div class="login-panel">
@@ -223,6 +346,7 @@ function renderApp() {
           </div>
         </div>
         <div class="top-right">
+          <button class="btn btn-ghost theme-toggle" id="themeToggleBtn">${currentTheme() === 'dark' ? 'Light mode' : 'Dark mode'}</button>
           <div class="who">
             <div class="avatar">${(state.session.name || state.session.u || '?').charAt(0).toUpperCase()}</div>
             <div class="who-text">
@@ -248,26 +372,41 @@ function renderApp() {
           ${state.error ? `<div class="err-banner"><span>${escapeHtml(state.error)}</span><button data-clear-alert="error">×</button></div>` : ''}
 
           ${state.view === 'tickets' ? `
-            <div class="filter-bar">
-              <input id="ticketSearch" value="${escapeHtml(state.search)}" placeholder="Cari tiket, judul, part, atau kategori..." />
-              <select id="filterStatus">
-                <option value="">Semua status</option>
-                ${Object.keys(STATUS_LABEL).map(s => `<option value="${s}" ${state.filterStatus === s ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('')}
-              </select>
-              <select id="filterCategory">
-                <option value="">Semua kategori</option>
-                ${CATS.map(cat => `<option value="${cat}" ${state.filterCategory === cat ? 'selected' : ''}>${cat}</option>`).join('')}
-              </select>
-              <select id="filterPriority">
-                <option value="">Semua prioritas</option>
-                ${Object.keys(PRIORITY_LABEL).map(p => `<option value="${p}" ${state.filterPriority === p ? 'selected' : ''}>${PRIORITY_LABEL[p]}</option>`).join('')}
-              </select>
-              <select id="filterTarget">
-                <option value="">Semua tujuan</option>
-                <option value="UT" ${state.filterTarget === 'UT' ? 'selected' : ''}>United Tractors</option>
-                <option value="SM_PAMA" ${state.filterTarget === 'SM_PAMA' ? 'selected' : ''}>SM PAMA</option>
-                <option value="BOTH" ${state.filterTarget === 'BOTH' ? 'selected' : ''}>UT & SM PAMA</option>
-              </select>
+            <div class="toolbar-panel">
+              <div class="filter-bar">
+                <input id="ticketSearch" value="${escapeHtml(state.search)}" placeholder="Cari tiket, judul, part, atau kategori..." />
+                <select id="filterStatus">
+                  <option value="">Semua status</option>
+                  ${Object.keys(STATUS_LABEL).map(s => `<option value="${s}" ${state.filterStatus === s ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('')}
+                </select>
+                <select id="filterCategory">
+                  <option value="">Semua kategori</option>
+                  ${CATS.map(cat => `<option value="${cat}" ${state.filterCategory === cat ? 'selected' : ''}>${cat}</option>`).join('')}
+                </select>
+                <select id="filterPriority">
+                  <option value="">Semua prioritas</option>
+                  ${Object.keys(PRIORITY_LABEL).map(p => `<option value="${p}" ${state.filterPriority === p ? 'selected' : ''}>${PRIORITY_LABEL[p]}</option>`).join('')}
+                </select>
+                <select id="filterTarget">
+                  <option value="">Semua tujuan</option>
+                  <option value="UT" ${state.filterTarget === 'UT' ? 'selected' : ''}>United Tractors</option>
+                  <option value="SM_PAMA" ${state.filterTarget === 'SM_PAMA' ? 'selected' : ''}>SM PAMA</option>
+                  <option value="BOTH" ${state.filterTarget === 'BOTH' ? 'selected' : ''}>UT & SM PAMA</option>
+                </select>
+              </div>
+
+              <div class="quick-actions">
+                <button class="btn btn-ghost" id="exportCsvBtn">Export CSV</button>
+                ${state.session.role === 'ADMIN' ? `<button class="btn btn-ghost" id="resetDemoBtn">Reset demo data</button>` : ''}
+              </div>
+            </div>
+
+            <div class="mini-summary">
+              <div class="mini-card"><strong>${total}</strong><span>Total</span></div>
+              <div class="mini-card"><strong>${open}</strong><span>Open</span></div>
+              <div class="mini-card"><strong>${processing}</strong><span>Processing</span></div>
+              <div class="mini-card"><strong>${closed}</strong><span>Closed</span></div>
+              <div class="mini-card"><strong>${rejected}</strong><span>Rejected</span></div>
             </div>
 
             ${ticketList.length ? `
@@ -583,9 +722,20 @@ function render() {
 }
 
 function bindLogin() {
-  document.getElementById('loginBtn')?.addEventListener('click', () => {
-    const username = document.getElementById('loginUser').value.trim();
-    const password = document.getElementById('loginPass').value;
+  const loginInput = document.getElementById('loginUser');
+  const passInput = document.getElementById('loginPass');
+  const loginBtn = document.getElementById('loginBtn');
+
+  loginBtn?.addEventListener('click', performLogin);
+  [loginInput, passInput].forEach((el) => {
+    el?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') performLogin();
+    });
+  });
+
+  function performLogin() {
+    const username = loginInput.value.trim();
+    const password = passInput.value;
     const found = state.users.find(u => u.u === username && u.password === password);
 
     if (!found) {
@@ -598,7 +748,7 @@ function bindLogin() {
     localStorage.setItem('utpama_session', JSON.stringify(state.session));
     state.error = '';
     render();
-  });
+  }
 }
 
 function bindApp() {
@@ -626,6 +776,12 @@ function bindApp() {
     state.view = 'tickets';
     render();
   });
+
+  document.getElementById('themeToggleBtn')?.addEventListener('click', toggleTheme);
+
+  document.getElementById('exportCsvBtn')?.addEventListener('click', exportCsv);
+
+  document.getElementById('resetDemoBtn')?.addEventListener('click', resetDemoData);
 
   document.getElementById('ticketSearch')?.addEventListener('input', (event) => {
     state.search = event.target.value;
@@ -830,6 +986,9 @@ function bindApp() {
 }
 
 function bootstrap() {
+  const savedTheme = localStorage.getItem('utpama_theme');
+  if (savedTheme) setTheme(savedTheme);
+  ensureDemoData();
   initSupabase();
   render();
 }
