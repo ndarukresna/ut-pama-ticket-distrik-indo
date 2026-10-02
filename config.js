@@ -1,6 +1,6 @@
 window.SUPABASE_CONFIG = {
-  url: process.env.REACT_APP_SUPABASE_URL || "https://your-project.supabase.co",
-  anonKey: process.env.REACT_APP_SUPABASE_ANON_KEY || "your-anon-key",
+  url: "https://your-project.supabase.co",
+  anonKey: "your-anon-key",
   enabled: false,
 };
 
